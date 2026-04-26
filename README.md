@@ -32,6 +32,18 @@ Minimum bağlantı:
 - `CALIPER_DATA_PIN`
 - `CALIPER_CLK_PIN`
 
+### Ölçek (2x / 0.5x okuma düzeltme)
+
+Bazı 24‑bit Çin kumpasları mm değerini **0.005mm/adım** (200 count = 1mm) olarak gönderir.
+Eğer seri portta gördüğün değer kumpastaki değerin **tam 2 katı** ise, ölçek katsayısı yanlış demektir.
+
+[src/main.cpp](src/main.cpp) içinde:
+
+- `COUNTS_PER_MM`
+- `COUNTS_PER_INCH`
+
+değerlerini kendi kumpasına göre ayarlayabilirsin.
+
 ## Çalıştırma
 
 PlatformIO komutları:
@@ -53,6 +65,9 @@ Bu projede 4MB’a uygun partition ayarı yapıldı. Düzeltmek için **flash’
 - `./pio.ps1 run -t erase`
 - `./pio.ps1 run -t upload`
 - `./pio.ps1 device monitor`
+
+> Windows notu: `device monitor` açıkken upload genelde "port is busy" hatası verir.
+> Upload için monitor’u durdurup (Ctrl+C / terminali kapatıp) tekrar upload et.
 
 Seri ekranda mm ve inch değerleri yazacaktır.
 
