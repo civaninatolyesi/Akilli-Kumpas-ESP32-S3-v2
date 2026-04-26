@@ -1,3 +1,4 @@
 .pio/
 .vscode/
 *.code-workspace
+include/wifi_secrets.h

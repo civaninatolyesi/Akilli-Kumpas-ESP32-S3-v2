@@ -44,6 +44,13 @@ Eğer seri portta gördüğün değer kumpastaki değerin **tam 2 katı** ise, �
 
 değerlerini kendi kumpasına göre ayarlayabilirsin.
 
+### Negatif değer görünmüyorsa (ZERO sonrası)
+
+Bazı 24‑bit Çin kumpaslarında işaret biti (sign) **bit20** yerine **bit23** olabiliyor.
+Eğer kumpasta ZERO yaptıktan sonra eksi değerler hiç görünmüyorsa:
+
+- [src/main.cpp](src/main.cpp) içindeki `CALIPER_SIGN_BIT` değerini **20 → 23** yapıp tekrar upload et.
+
 ## Çalıştırma
 
 PlatformIO komutları:
