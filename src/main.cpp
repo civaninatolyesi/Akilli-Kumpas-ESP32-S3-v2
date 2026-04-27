@@ -55,6 +55,93 @@ static bool g_debugRaw = false;
 // If unit bit is missing/noisy, infer mm/inch by continuity of the physical value.
 static bool g_autoUnitFix = true;
 
+// Unit inference state (prevents tiny movements from flipping unit).
+static bool g_unitStateIsInch = false;
+static bool g_hasUnitState = false;
+static bool g_unitPendingIsInch = false;
+static uint8_t g_unitPendingCount = 0;
+
+static constexpr uint8_t UNIT_SWITCH_CONFIRM = 3;        // require N consecutive strong hints
+static constexpr float UNIT_SWITCH_MIN_BAD_MM = 4.0f;    // current-unit interpretation must be this wrong (mm)
+static constexpr float UNIT_SWITCH_MAX_GOOD_MM = 0.40f;  // alternate interpretation must be within this (mm)
+
+// Unit-bit probing support: capture one stable frame in mm and one in inch,
+// then compare bits (especially 20..23) to find a real unit flag.
+static uint32_t g_lastAcceptedRaw24 = 0;
+static bool g_hasLastAcceptedRaw24 = false;
+static uint32_t g_probeMmRaw24 = 0;
+static uint32_t g_probeInRaw24 = 0;
+static bool g_hasProbeMm = false;
+static bool g_hasProbeIn = false;
+
+static void printBitSummary(const char *tag, uint32_t raw24) {
+  const uint32_t b20 = (raw24 >> 20) & 1u;
+  const uint32_t b21 = (raw24 >> 21) & 1u;
+  const uint32_t b22 = (raw24 >> 22) & 1u;
+  const uint32_t b23 = (raw24 >> 23) & 1u;
+  Serial.printf("[%s] raw=0x%06lX  b20=%lu b21=%lu b22=%lu b23=%lu\n",
+                tag,
+                (unsigned long)(raw24 & 0xFFFFFFu),
+                (unsigned long)b20,
+                (unsigned long)b21,
+                (unsigned long)b22,
+                (unsigned long)b23);
+}
+
+static void analyzeUnitProbe() {
+  if (!g_hasProbeMm || !g_hasProbeIn) {
+    Serial.println("[probe] Need both samples: press 'm' (mm sample) and 'i' (inch sample) first.");
+    return;
+  }
+
+  const uint32_t mmRaw = g_probeMmRaw24 & 0xFFFFFFu;
+  const uint32_t inRaw = g_probeInRaw24 & 0xFFFFFFu;
+  const uint32_t diff = (mmRaw ^ inRaw) & 0xFFFFFFu;
+  const uint32_t diffTop = diff & 0xF00000u; // bits 20..23
+
+  Serial.printf("[probe] mmRaw=0x%06lX  inRaw=0x%06lX  diff=0x%06lX\n",
+                (unsigned long)mmRaw,
+                (unsigned long)inRaw,
+                (unsigned long)diff);
+  printBitSummary("probe:mm", mmRaw);
+  printBitSummary("probe:in", inRaw);
+
+  if (diffTop == 0u) {
+    Serial.println("[probe] No change in bits 20..23 between mm/inch samples.");
+    Serial.println("[probe] This caliper may not transmit a dedicated unit flag bit, or the bit is outside 20..23.");
+    Serial.println("[probe] In that case, autoUnitFix (continuity) or a debounced heuristic is the practical option.");
+    return;
+  }
+
+  Serial.print("[probe] Top-bit changes:");
+  for (uint8_t b = 20; b <= 23; b++) {
+    if (diffTop & (1u << b)) {
+      const uint32_t mmv = (mmRaw >> b) & 1u;
+      const uint32_t inv = (inRaw >> b) & 1u;
+      Serial.printf(" b%u(mm=%lu,in=%lu)", (unsigned)b, (unsigned long)mmv, (unsigned long)inv);
+    }
+  }
+  Serial.println();
+
+  // Suggest a unit bit among 20..23 that isn't the configured sign bit.
+  int8_t suggestedBit = -1;
+  for (int8_t b = 23; b >= 20; b--) {
+    if ((diffTop & (1u << b)) == 0u) continue;
+    if ((uint8_t)b == g_signBit) continue;
+    suggestedBit = b;
+    break;
+  }
+
+  if (suggestedBit < 0) {
+    Serial.println("[probe] Only the configured sign bit changed in the top bits; can't suggest a separate unit bit.");
+    return;
+  }
+
+  const bool inchWhen1 = (((inRaw >> (uint8_t)suggestedBit) & 1u) != 0u);
+  Serial.printf("[probe] Suggested UNIT bit: %d  (inchWhen1=%u)\n", (int)suggestedBit, (unsigned)(inchWhen1 ? 1 : 0));
+  Serial.println("[probe] You can set it quickly by cycling unit bit with 'U' until it matches, then toggle polarity with 'u' if needed.");
+}
+
 // Filtering: require more repeats if the value jumps a lot.
 static constexpr uint8_t STABLE_REPEATS_NORMAL = 2;
 static constexpr uint8_t STABLE_REPEATS_ON_JUMP = 4;
@@ -113,6 +200,10 @@ static void printHelp() {
   Serial.println("  ?  : help");
   Serial.println("  d  : toggle raw debug prints");
   Serial.println("  a  : toggle auto unit fix (mm/inch inference by continuity)");
+  Serial.println("  m  : capture probe sample (current caliper unit MUST be mm)");
+  Serial.println("  i  : capture probe sample (current caliper unit MUST be inch)");
+  Serial.println("  p  : analyze probe samples and suggest unit bit");
+  Serial.println("  U  : cycle unit bit among {20,22,23} (avoids sign bit)");
   Serial.println("  t  : toggle sign mode (sign-bit <-> two's complement)");
   Serial.println("  s  : force sign mode = sign-bit");
   Serial.println("  c  : force sign mode = two's complement");
@@ -132,13 +223,14 @@ static void printHelp() {
 }
 
 static void printStatus() {
-  Serial.printf("[status] signBit=%u unitBit=%u signPolarity(bit1Neg)=%u unitPolarity(bit1Inch)=%u signMode=%s autoUnitFix=%u\n",
+  Serial.printf("[status] signBit=%u unitBit=%u signPolarity(bit1Neg)=%u unitPolarity(bit1Inch)=%u signMode=%s autoUnitFix=%u unitState=%s\n",
                 (unsigned)g_signBit,
                 (unsigned)g_unitBit,
                 (unsigned)(g_signBitMeansNegativeWhen1 ? 1 : 0),
                 (unsigned)(g_unitBitMeansInchWhen1 ? 1 : 0),
                 (g_signMode == SignMode::SignBit) ? "sign-bit" : "twos-complement",
-                (unsigned)(g_autoUnitFix ? 1 : 0));
+                (unsigned)(g_autoUnitFix ? 1 : 0),
+                g_hasUnitState ? (g_unitStateIsInch ? "inch" : "mm") : "(unset)");
 }
 
 static void handleSerialCommands() {
@@ -159,6 +251,57 @@ static void handleSerialCommands() {
     if (c == 'a' || c == 'A') {
       g_autoUnitFix = !g_autoUnitFix;
       Serial.printf("[toggle] autoUnitFix=%u\n", (unsigned)(g_autoUnitFix ? 1 : 0));
+      printStatus();
+      continue;
+    }
+
+    if (c == 'm') {
+      if (!g_hasLastAcceptedRaw24) {
+        Serial.println("[probe] No accepted frame yet. Move caliper slightly and wait for a 'raw=' line.");
+        continue;
+      }
+      g_probeMmRaw24 = g_lastAcceptedRaw24;
+      g_hasProbeMm = true;
+      Serial.println("[probe] Captured MM sample.");
+      printBitSummary("probe:mm", g_probeMmRaw24);
+      continue;
+    }
+
+    if (c == 'i') {
+      if (!g_hasLastAcceptedRaw24) {
+        Serial.println("[probe] No accepted frame yet. Move caliper slightly and wait for a 'raw=' line.");
+        continue;
+      }
+      g_probeInRaw24 = g_lastAcceptedRaw24;
+      g_hasProbeIn = true;
+      Serial.println("[probe] Captured INCH sample.");
+      printBitSummary("probe:in", g_probeInRaw24);
+      continue;
+    }
+
+    if (c == 'p' || c == 'P') {
+      analyzeUnitProbe();
+      continue;
+    }
+
+    if (c == 'U') {
+      // Cycle likely unit-bit candidates (top bits), skipping the configured sign bit.
+      static const uint8_t candidates[] = {20, 22, 23};
+      uint8_t idx = 0;
+      for (uint8_t k = 0; k < (sizeof(candidates) / sizeof(candidates[0])); k++) {
+        if (g_unitBit == candidates[k]) {
+          idx = (uint8_t)((k + 1u) % (sizeof(candidates) / sizeof(candidates[0])));
+          break;
+        }
+      }
+      uint8_t next = candidates[idx];
+      if (next == g_signBit) {
+        // If it conflicts, just advance one more.
+        idx = (uint8_t)((idx + 1u) % (sizeof(candidates) / sizeof(candidates[0])));
+        next = candidates[idx];
+      }
+      g_unitBit = next;
+      Serial.printf("[unit] unitBit=%u\n", (unsigned)g_unitBit);
       printStatus();
       continue;
     }
@@ -229,20 +372,46 @@ static float countsToInches(int32_t counts, bool isInch) {
   return inches;
 }
 
-static bool inferIsInchByContinuity(int32_t signedCounts, bool configuredIsInch, bool hasLastMm, float lastMm) {
-  if (!g_autoUnitFix || !hasLastMm) return configuredIsInch;
-
-  const float mmConfigured = countsToMillimeters(signedCounts, configuredIsInch);
-  const float mmAlternative = countsToMillimeters(signedCounts, !configuredIsInch);
-  const float dConfigured = fabsf(mmConfigured - lastMm);
-  const float dAlternative = fabsf(mmAlternative - lastMm);
-
-  // Flip only when the alternative is clearly closer (avoid flapping).
-  // This also helps when the unit bit is noisy for a single frame.
-  if (dAlternative + 0.05f < dConfigured && dAlternative < 2.0f) {
-    return !configuredIsInch;
+static bool updateUnitStateByContinuity(int32_t signedCounts, bool configuredIsInch, bool hasLastMm, float lastMm) {
+  // Initialize unit state from configured bit (if any) on first use.
+  if (!g_hasUnitState) {
+    g_unitStateIsInch = configuredIsInch;
+    g_hasUnitState = true;
+    g_unitPendingCount = 0;
+    return g_unitStateIsInch;
   }
-  return configuredIsInch;
+
+  if (!g_autoUnitFix || !hasLastMm) {
+    g_unitPendingCount = 0;
+    return g_unitStateIsInch;
+  }
+
+  const bool current = g_unitStateIsInch;
+  const float mmCurrent = countsToMillimeters(signedCounts, current);
+  const float mmAlt = countsToMillimeters(signedCounts, !current);
+  const float dCurrent = fabsf(mmCurrent - lastMm);
+  const float dAlt = fabsf(mmAlt - lastMm);
+
+  // Strong hint: current interpretation is very wrong, alternate is very good.
+  const bool strongFlipHint = (dCurrent >= UNIT_SWITCH_MIN_BAD_MM) && (dAlt <= UNIT_SWITCH_MAX_GOOD_MM);
+  if (!strongFlipHint) {
+    g_unitPendingCount = 0;
+    return g_unitStateIsInch;
+  }
+
+  const bool candidate = !current;
+  if (g_unitPendingCount == 0 || g_unitPendingIsInch != candidate) {
+    g_unitPendingIsInch = candidate;
+    g_unitPendingCount = 1;
+  } else {
+    if (g_unitPendingCount < 255) g_unitPendingCount++;
+  }
+
+  if (g_unitPendingCount >= UNIT_SWITCH_CONFIRM) {
+    g_unitStateIsInch = candidate;
+    g_unitPendingCount = 0;
+  }
+  return g_unitStateIsInch;
 }
 
 static void printChangedBits(uint32_t prev, uint32_t now) {
@@ -502,7 +671,7 @@ void loop() {
     if (pendingCount >= 2 && pendingKey != lastStableKey) {
       const auto decoded = decode24(pendingKey);
       const int32_t counts = countsSignedFromRaw(pendingKey, decoded);
-      const bool isInch = inferIsInchByContinuity(counts, decoded.isInch, hasLastPublished, lastPublishedMm);
+      const bool isInch = updateUnitStateByContinuity(counts, decoded.isInch, hasLastPublished, lastPublishedMm);
       const float mm = countsToMillimeters(counts, isInch);
       const float inch = countsToInches(counts, isInch);
 
@@ -520,6 +689,8 @@ void loop() {
         lastAcceptedMs = nowMs;
         hasLastPublished = true;
         lastPublishedMm = mm;
+        g_lastAcceptedRaw24 = (pendingKey & 0xFFFFFFu);
+        g_hasLastAcceptedRaw24 = true;
         Serial.printf("raw=0x%06lX  counts=%ld  unit=%s  mm=%.2f  in=%.4f\n",
                       (unsigned long)pendingKey,
                       (long)counts,
