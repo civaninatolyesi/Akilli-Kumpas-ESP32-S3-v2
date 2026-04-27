@@ -8,6 +8,7 @@
 // ---- User config ----
 static constexpr int CALIPER_DATA_PIN = 8; // GPIO8
 static constexpr int CALIPER_CLK_PIN = 9;  // GPIO9 (interrupt)
+static constexpr int BUTTON_PIN = 10;      // GPIO10 (pullup, active-high)
 
 // Scale factors (adjust if readings are off by a constant factor)
 // Many cheap 24-bit calipers use:
@@ -254,6 +255,8 @@ void setup() {
   Serial.println("ESP32-S3 dijital kumpas okuma basladi");
   Serial.printf("DATA GPIO: %d, CLOCK GPIO: %d\n", CALIPER_DATA_PIN, CALIPER_CLK_PIN);
 
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
   caliperBegin(CALIPER_DATA_PIN, CALIPER_CLK_PIN);
 
   webBegin();
@@ -268,7 +271,23 @@ void loop() {
   static uint32_t lastStableKey = 0;
   static bool hasLastPublished = false;
   static float lastPublishedMm = 0.0f;
+  static bool lastButtonReading = true;
+  static bool lastButtonStable = true;
+  static uint32_t lastButtonChangeMs = 0;
   const uint32_t nowMs = millis();
+
+  const bool buttonReading = (digitalRead(BUTTON_PIN) != LOW);
+  if (buttonReading != lastButtonReading) {
+    lastButtonReading = buttonReading;
+    lastButtonChangeMs = nowMs;
+  }
+  if ((uint32_t)(nowMs - lastButtonChangeMs) >= 20u) {
+    if (lastButtonStable != lastButtonReading) {
+      lastButtonStable = lastButtonReading;
+      const bool pressed = (lastButtonStable == true);
+      webUpdateButton(pressed);
+    }
+  }
 
   if (caliperReadFrame(raw)) {
     raw &= 0xFFFFFFu;
