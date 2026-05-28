@@ -9,6 +9,25 @@
 static constexpr int CALIPER_DATA_PIN = 8; // GPIO8
 static constexpr int CALIPER_CLK_PIN = 9;  // GPIO9 (interrupt)
 static constexpr int BUTTON_PIN = 10;      // GPIO10 (pullup, active-high)
+static constexpr int BATTERY_ADC_PIN = 5;  // GPIO5 ADC (LiPo via divider)
+
+// Battery measurement (update to match your divider and cell range)
+static constexpr float BAT_R1_OHMS = 100000.0f;  // top resistor (battery -> ADC)
+static constexpr float BAT_R2_OHMS = 100000.0f;  // bottom resistor (ADC -> GND)
+static constexpr float BATTERY_MIN_V = 3.0f;
+static constexpr float BATTERY_MAX_V = 4.2f;
+static constexpr uint32_t BATTERY_SAMPLE_MS = 500;
+static constexpr uint8_t BATTERY_SAMPLES = 8;
+static constexpr uint32_t BATTERY_SAMPLE_MS_CHARGING = 2000; // when charging, sample more often
+static constexpr uint32_t BATTERY_SAMPLE_MS_IDLE = 2000;    // when idle, sample less often
+static constexpr uint32_t BATTERY_REPORT_MAX_INTERVAL_MS = 5000; // force report at least every minute
+static constexpr uint32_t CHARGE_WINDOW_MS = 30000;
+static constexpr float CHARGE_MIN_DELTA_V = 0.010f;
+static constexpr float LONG_CHARGE_MIN_DELTA_V = 0.010f;
+static constexpr float CHARGE_NEAR_FULL_V = 4.15f;
+// Long-term stability detection for charging inference
+static constexpr uint32_t STABLE_PERIOD_MS = 120000;
+static constexpr float STABLE_DELTA_V = 0.006f;
 
 // Scale factors (adjust if readings are off by a constant factor)
 // Many cheap 24-bit calipers use:
@@ -45,6 +64,22 @@ static constexpr uint8_t CALIPER_UNIT_BIT = 23;     // often 21 on other variant
 
 static constexpr uint32_t valueMask() {
   return (CALIPER_VALUE_BITS >= 32) ? 0xFFFFFFFFu : ((1u << CALIPER_VALUE_BITS) - 1u);
+}
+
+static float clampf(float v, float lo, float hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
+
+static float batteryDividerRatio() {
+  return (BAT_R1_OHMS + BAT_R2_OHMS) / BAT_R2_OHMS;
+}
+
+static uint8_t batteryPercentFromVolts(float v) {
+  const float pct = (v - BATTERY_MIN_V) / (BATTERY_MAX_V - BATTERY_MIN_V);
+  const float clamped = clampf(pct, 0.0f, 1.0f);
+  return (uint8_t)(clamped * 100.0f + 0.5f);
 }
 
 // ---- Runtime layout (selectable over Serial for debugging) ----
@@ -254,8 +289,12 @@ void setup() {
   Serial.println();
   Serial.println("ESP32-S3 dijital kumpas okuma basladi");
   Serial.printf("DATA GPIO: %d, CLOCK GPIO: %d\n", CALIPER_DATA_PIN, CALIPER_CLK_PIN);
+  webLogf("Boot: main setup");
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BATTERY_ADC_PIN, INPUT);
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
 
   caliperBegin(CALIPER_DATA_PIN, CALIPER_CLK_PIN);
 
@@ -271,9 +310,23 @@ void loop() {
   static uint32_t lastStableKey = 0;
   static bool hasLastPublished = false;
   static float lastPublishedMm = 0.0f;
+  static float lastPublishedInch = 0.0f;
+  static bool lastPublishedIsInch = false;
   static bool lastButtonReading = true;
   static bool lastButtonStable = true;
   static uint32_t lastButtonChangeMs = 0;
+  static uint32_t lastBatteryMs = 0;
+  static float filteredBatV = 0.0f;
+  static bool hasBattery = false;
+  static uint32_t chargeWindowStartMs = 0;
+  static float chargeWindowStartV = 0.0f;
+  static uint32_t stableSinceMs = 0;
+  static float stableBaseV = 0.0f;
+  static float prevReportedBatV = 0.0f;
+  static uint16_t prevReportedAdcMv = 0;
+  static uint8_t prevReportedPct = 0;
+  static bool prevReportedCharging = false;
+  static uint32_t lastBatteryReportMs = 0;
   const uint32_t nowMs = millis();
 
   const bool buttonReading = (digitalRead(BUTTON_PIN) != LOW);
@@ -286,6 +339,83 @@ void loop() {
       lastButtonStable = lastButtonReading;
       const bool pressed = (lastButtonStable == true);
       webUpdateButton(pressed);
+    }
+  }
+
+  // choose sample interval based on whether we currently appear to be charging
+  const uint32_t currentSampleMs = (chargeWindowStartV > 0 &&
+                                    ((filteredBatV >= (chargeWindowStartV + CHARGE_MIN_DELTA_V)) && (filteredBatV < CHARGE_NEAR_FULL_V)))
+                                    ? BATTERY_SAMPLE_MS_CHARGING
+                                    : BATTERY_SAMPLE_MS_IDLE;
+
+  if ((uint32_t)(nowMs - lastBatteryMs) >= currentSampleMs) {
+    lastBatteryMs = nowMs;
+    uint32_t sumMv = 0;
+    for (uint8_t i = 0; i < BATTERY_SAMPLES; i++) {
+      sumMv += (uint32_t)analogReadMilliVolts(BATTERY_ADC_PIN);
+    }
+    const uint16_t adcMv = (uint16_t)(sumMv / BATTERY_SAMPLES);
+    const float batV = ((float)adcMv / 1000.0f) * batteryDividerRatio();
+    // Update filtered voltage and track both short-term and long-term stability.
+    if (!hasBattery) {
+      filteredBatV = batV;
+      hasBattery = true;
+      chargeWindowStartMs = nowMs;
+      chargeWindowStartV = batV;
+      stableSinceMs = nowMs;
+      stableBaseV = batV;
+    } else {
+      const float prevFiltered = filteredBatV;
+      filteredBatV = (filteredBatV * 0.85f) + (batV * 0.15f);
+      const float deltaFiltered = fabsf(filteredBatV - prevFiltered);
+      // If voltage changes very little, consider it part of a stable period.
+      if (deltaFiltered <= STABLE_DELTA_V) {
+        if (stableSinceMs == 0) {
+          stableSinceMs = nowMs;
+          stableBaseV = prevFiltered;
+        }
+      } else {
+        // Significant movement — reset long-term stable window.
+        stableSinceMs = 0;
+        stableBaseV = filteredBatV;
+      }
+    }
+
+    // Update short-term baseline used for quick charging hints
+    if ((uint32_t)(nowMs - chargeWindowStartMs) >= CHARGE_WINDOW_MS) {
+      chargeWindowStartMs = nowMs;
+      chargeWindowStartV = filteredBatV;
+    }
+    if (filteredBatV < (chargeWindowStartV - 0.02f)) {
+      chargeWindowStartMs = nowMs;
+      chargeWindowStartV = filteredBatV;
+    }
+
+    // Charging if either quick baseline increased, or a long-stable base later rose.
+    const bool quickCharging = (filteredBatV >= (chargeWindowStartV + CHARGE_MIN_DELTA_V)) &&
+                               (filteredBatV < CHARGE_NEAR_FULL_V);
+    bool longTermCharging = false;
+    if (stableSinceMs != 0 && ((uint32_t)(nowMs - stableSinceMs) >= STABLE_PERIOD_MS)) {
+      if (filteredBatV >= (stableBaseV + LONG_CHARGE_MIN_DELTA_V) && filteredBatV < CHARGE_NEAR_FULL_V) {
+        longTermCharging = true;
+      }
+    }
+    const bool charging = quickCharging || longTermCharging;
+    const uint8_t pct = batteryPercentFromVolts(filteredBatV);
+
+    // Only report if meaningful change occurred or max interval passed
+    const bool significantVoltageChange = fabsf(filteredBatV - prevReportedBatV) >= 0.01f;
+    const bool pctChanged = (pct != prevReportedPct);
+    const bool chargingChanged = (charging != prevReportedCharging);
+    const bool timeExpired = ((uint32_t)(nowMs - lastBatteryReportMs) >= BATTERY_REPORT_MAX_INTERVAL_MS);
+
+    if (significantVoltageChange || pctChanged || chargingChanged || timeExpired) {
+      prevReportedBatV = filteredBatV;
+      prevReportedAdcMv = adcMv;
+      prevReportedPct = pct;
+      prevReportedCharging = charging;
+      lastBatteryReportMs = nowMs;
+      webUpdateBattery(filteredBatV, adcMv, pct, charging);
     }
   }
 
@@ -332,6 +462,8 @@ void loop() {
         lastStableKey = pendingKey;
         hasLastPublished = true;
         lastPublishedMm = mm;
+        lastPublishedInch = inch;
+        lastPublishedIsInch = isInch;
         webUpdateMeasurement(pendingKey, mm, inch, isInch, counts < 0);
       }
     }

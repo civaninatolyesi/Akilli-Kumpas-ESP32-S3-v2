@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <stdarg.h>
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -29,10 +30,61 @@ static float lastInch = 0.0f;
 static bool lastIsInch = false;
 static bool lastIsNegative = false;
 static bool lastButtonPressed = false;
+static float lastBatV = 0.0f;
+static uint16_t lastBatAdcMv = 0;
+static uint8_t lastBatPct = 0;
+static bool lastBatCharging = false;
 static uint32_t lastUpdateMs = 0;
+
+static constexpr uint16_t LOG_CAP = 100;
+static constexpr uint16_t LOG_LINE_MAX = 96;
+static uint32_t logSeq = 0;
+static uint16_t logCount = 0;
+static char logLines[LOG_CAP][LOG_LINE_MAX];
 
 static Preferences prefs;
 static float calOffsetMm = 0.0f;
+
+static void appendLogLine(const char *line) {
+  if (!line || !line[0]) return;
+  const uint16_t index = (uint16_t)(logSeq % LOG_CAP);
+  strncpy(logLines[index], line, LOG_LINE_MAX - 1);
+  logLines[index][LOG_LINE_MAX - 1] = '\0';
+  logSeq++;
+  if (logCount < LOG_CAP) {
+    logCount++;
+  }
+}
+
+void webLogf(const char *fmt, ...) {
+  char buf[LOG_LINE_MAX];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  appendLogLine(buf);
+}
+
+static void appendJsonEscaped(String &out, const char *s) {
+  while (*s) {
+    const char c = *s++;
+    if (c == '"') {
+      out += "\\\"";
+    } else if (c == '\\') {
+      out += "\\\\";
+    } else if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else if (c == '\t') {
+      out += "\\t";
+    } else if ((uint8_t)c < 0x20) {
+      // Skip other control characters.
+    } else {
+      out += c;
+    }
+  }
+}
 
 static const char INDEX_HTML[] PROGMEM = R"HTML(
 <!doctype html>
@@ -43,14 +95,60 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   <title>Kumpas Ölçüm</title>
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-    .card { max-width: 640px; padding: 16px 18px; border: 1px solid rgba(127,127,127,.35); border-radius: 12px; }
-    .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline; }
-    .big { font-size: 56px; font-weight: 700; letter-spacing: -1px; }
+    body {
+      font-family: "Trebuchet MS", "Lucida Sans", "Gill Sans", sans-serif;
+      margin: 20px;
+      background: radial-gradient(1200px 480px at 10% -10%, rgba(120,180,255,.18), transparent 60%),
+                  radial-gradient(900px 420px at 110% 10%, rgba(80,180,120,.18), transparent 55%),
+                  linear-gradient(180deg, rgba(255,255,255,.02), rgba(0,0,0,.05));
+    }
+    .card { max-width: 760px; margin: 0 auto; padding: 16px 18px; border: 1px solid rgba(127,127,127,.35); border-radius: 16px; background: rgba(255,255,255,.02); box-shadow: 0 12px 30px rgba(0,0,0,.08); }
+    .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline; }
+    .big { font-size: 52px; font-weight: 700; letter-spacing: -1px; }
     .unit { font-size: 18px; opacity: .75; margin-left: 8px; }
     .meta { margin-top: 12px; opacity: .75; font-size: 14px; }
     .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(127,127,127,.35); }
     .muted { opacity: .6; }
+    .battery { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
+    .battery-bar { position: relative; height: 18px; border-radius: 999px; background: rgba(127,127,127,.2); overflow: hidden; }
+    .battery-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #56c070, #9de26a); transition: width .25s ease; }
+    .battery-fill.low { background: linear-gradient(90deg, #e05a5a, #f0b35a); }
+    .battery-label { display: flex; align-items: baseline; gap: 10px; font-size: 22px; }
+    .battery-volts { font-size: 16px; opacity: .75; }
+    .charge-pill { display:inline-flex; align-items:center; gap:8px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(127,127,127,.35); font-size: 12px; letter-spacing: .3px; text-transform: uppercase; }
+    .charge-dot { width: 8px; height: 8px; border-radius: 50%; background: #a6a6a6; }
+    .charge-pill.on { border-color: rgba(86,192,112,.5); color: #56c070; }
+    .charge-pill.on .charge-dot { background: #56c070; box-shadow: 0 0 0 6px rgba(86,192,112,.15); animation: pulse 1.6s ease-in-out infinite; }
+    @keyframes pulse { 0% { transform: scale(.85); opacity: .5; } 50% { transform: scale(1.1); opacity: 1; } 100% { transform: scale(.85); opacity: .5; } }
+    .actions { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+    .action-link {
+      text-decoration: none;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(127,127,127,.35);
+      background: linear-gradient(160deg, rgba(255,255,255,.08), rgba(0,0,0,.05));
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.05), 0 6px 16px rgba(0,0,0,.12);
+      font-size: 13px;
+      letter-spacing: .2px;
+      transition: transform .12s ease, box-shadow .12s ease;
+    }
+    .action-link:hover { transform: translateY(-1px); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08), 0 10px 22px rgba(0,0,0,.16); }
+    .action-link:focus-visible { outline: 2px solid rgba(120,180,255,.6); outline-offset: 2px; }
+    .action-link.log { border-color: rgba(120,180,255,.45); color: #7fb6ff; }
+    .log-wrap { margin-top: 10px; border: 1px solid rgba(127,127,127,.25); border-radius: 10px; padding: 10px; background: rgba(0,0,0,.08); max-height: 260px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+    .btn { padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.04); color: inherit; }
+    .input { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.03); color: inherit; }
+    @media (max-width: 640px) {
+      body { margin: 12px; }
+      .card { padding: 14px; border-radius: 14px; }
+      .row { gap: 10px; }
+      .big { font-size: 42px; }
+      .unit { font-size: 16px; }
+      .meta { font-size: 13px; }
+      .actions { gap: 8px; }
+      .action-link { padding: 6px 10px; font-size: 12px; }
+      .battery-label { font-size: 20px; }
+    }
   </style>
 </head>
 <body>
@@ -76,10 +174,24 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       <span class="pill" id="cal">cal=--</span>
     </div>
 
-    <div class="meta">
-      <a href="/update">Yazılım Güncelle</a>
-      <span class="muted"> | </span>
-      <a href="/calibrate">Kalibrasyon</a>
+    <div class="actions">
+      <a class="action-link" href="/update">Yazılım Güncelle</a>
+      <a class="action-link" href="/calibrate">Kalibrasyon</a>
+      <a class="action-link log" href="/log">Log</a>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <div class="row" style="justify-content: space-between; align-items:center;">
+      <div>
+        <div class="muted">Pil Durumu</div>
+        <div class="battery-label"><span id="batPct">--%</span><span id="batV" class="battery-volts">-- V</span></div>
+      </div>
+      <div class="charge-pill" id="batCharge"><span class="charge-dot"></span><span id="batChargeText"></span></div>
+    </div>
+    <div class="battery" style="margin-top:10px;">
+      <div class="battery-bar"><div id="batFill" class="battery-fill"></div></div>
+      <div class="muted" style="font-size:12px;">GPIO5 ADC</div>
     </div>
   </div>
 
@@ -89,7 +201,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <div class="muted">Buton Logu</div>
         <div class="muted" style="font-size:12px;">Butona basildiginda kayit alinir</div>
       </div>
-      <button id="clearLog" type="button">Temizle</button>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button id="exportCsv" class="btn" type="button">CSV Indir</button>
+        <button id="clearLog" class="btn" type="button">Temizle</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:10px; align-items:center;">
+      <label for="noteInput" class="muted" style="font-size:12px;">Not:</label>
+      <input id="noteInput" class="input" type="text" maxlength="80" placeholder="Olcum notu" style="flex:1; min-width:180px;" />
     </div>
     <div style="margin-top:12px; overflow:auto; max-height:260px;">
       <table style="width:100%; border-collapse:collapse; font-size:14px;">
@@ -109,6 +228,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 <script>
   const logBody = document.getElementById('logBody');
   const clearLog = document.getElementById('clearLog');
+  const exportCsv = document.getElementById('exportCsv');
+  const noteInput = document.getElementById('noteInput');
   let lastBtnPressed = null;
 
   function fmtTime(ts){
@@ -122,13 +243,17 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     const tr = document.createElement('tr');
     const ts = fmtTime(Date.now());
     const unitNote = j.isInch ? 'inch kaynagi' : 'mm kaynagi';
+    const userNote = noteInput.value.trim();
+    const noteText = userNote ? `${userNote} (${unitNote})` : unitNote;
     tr.innerHTML = `
       <td style="padding:6px 4px; border-bottom:1px solid rgba(127,127,127,.2);">${ts}</td>
       <td style="padding:6px 4px; text-align:right; border-bottom:1px solid rgba(127,127,127,.2);">${j.mm.toFixed(2)}</td>
       <td style="padding:6px 4px; text-align:right; border-bottom:1px solid rgba(127,127,127,.2);">${j.inch.toFixed(4)}</td>
-      <td style="padding:6px 4px; border-bottom:1px solid rgba(127,127,127,.2);">${unitNote}</td>
+      <td style="padding:6px 4px; border-bottom:1px solid rgba(127,127,127,.2);">${noteText}</td>
     `;
     logBody.prepend(tr);
+
+    if (userNote) noteInput.value = '';
 
     const maxRows = 200;
     while (logBody.children.length > maxRows) {
@@ -138,6 +263,32 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 
   clearLog.addEventListener('click', () => {
     logBody.innerHTML = '';
+  });
+
+  exportCsv.addEventListener('click', () => {
+    const now = new Date();
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}-${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
+    const rows = [
+      ['Zaman', 'mm', 'in', 'Not']
+    ];
+    Array.from(logBody.children).reverse().forEach((tr) => {
+      const cells = Array.from(tr.children).map((td) => td.textContent || '');
+      rows.push(cells);
+    });
+    const csv = rows.map((row) => row.map((v) => {
+      const s = String(v).replace(/"/g, '""');
+      return `"${s}"`;
+    }).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `buton-logu-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   });
 
   function hex6(n){
@@ -158,6 +309,25 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       document.getElementById('btn').textContent = 'btn=' + (j.buttonPressed ? 'pressed' : 'released');
       document.getElementById('cal').textContent = 'cal=' + j.offsetMm.toFixed(3) + ' mm';
       document.getElementById('age').textContent = j.ageMs + ' ms';
+      const pct = Math.max(0, Math.min(100, j.batPct));
+      document.getElementById('batPct').textContent = pct + '%';
+      document.getElementById('batV').textContent = j.batV.toFixed(2) + ' V';
+      const charge = document.getElementById('batCharge');
+      const chargeText = document.getElementById('batChargeText');
+      if (j.batCharging) {
+        charge.classList.add('on');
+        chargeText.textContent = 'Voltaj yükseliyor';
+      } else {
+        charge.classList.remove('on');
+        chargeText.textContent = '';
+      }
+      const fill = document.getElementById('batFill');
+      fill.style.width = pct + '%';
+      if (pct <= 20) {
+        fill.classList.add('low');
+      } else {
+        fill.classList.remove('low');
+      }
 
       if (lastBtnPressed === null) {
         lastBtnPressed = j.buttonPressed;
@@ -172,9 +342,108 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     } catch(e) {
       document.getElementById('status').textContent = 'offline';
     }
+
   }
 
   setInterval(tick, 200);
+  tick();
+</script>
+</body>
+</html>
+)HTML";
+
+static const char LOG_HTML[] PROGMEM = R"HTML(
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Log</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: "Trebuchet MS", "Lucida Sans", "Gill Sans", sans-serif;
+      margin: 20px;
+      background: radial-gradient(1200px 480px at 10% -10%, rgba(120,180,255,.18), transparent 60%),
+                  radial-gradient(900px 420px at 110% 10%, rgba(80,180,120,.18), transparent 55%),
+                  linear-gradient(180deg, rgba(255,255,255,.02), rgba(0,0,0,.05));
+    }
+    .card { max-width: 760px; margin: 0 auto; padding: 16px 18px; border: 1px solid rgba(127,127,127,.35); border-radius: 16px; background: rgba(255,255,255,.02); box-shadow: 0 12px 30px rgba(0,0,0,.08); }
+    .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+    .muted { opacity: .7; }
+    .action-link {
+      text-decoration: none;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(127,127,127,.35);
+      background: linear-gradient(160deg, rgba(255,255,255,.08), rgba(0,0,0,.05));
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.05), 0 6px 16px rgba(0,0,0,.12);
+      font-size: 13px;
+      letter-spacing: .2px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .log-wrap { margin-top: 10px; border: 1px solid rgba(127,127,127,.25); border-radius: 10px; padding: 10px; background: rgba(0,0,0,.08); max-height: 420px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+    .log-line { white-space: pre-wrap; line-height: 1.35; border-bottom: 1px dashed rgba(127,127,127,.15); padding: 2px 0; }
+    .log-line:last-child { border-bottom: none; }
+    .btn { padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.04); color: inherit; }
+    @media (max-width: 640px) {
+      body { margin: 12px; }
+      .card { padding: 14px; border-radius: 14px; }
+      .row { gap: 10px; }
+      .action-link { padding: 6px 10px; font-size: 12px; }
+      .log-wrap { max-height: 520px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="muted">Log</div>
+        <div class="muted" style="font-size:12px;">Hata ve durum kayitlari</div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <button id="clearLogUi" class="btn" type="button">Temizle</button>
+        <a class="action-link" href="/">Ana sayfa <-</a>
+      </div>
+    </div>
+    <div id="logWrap" class="log-wrap"></div>
+  </div>
+
+<script>
+  const logWrap = document.getElementById('logWrap');
+  const clearLogUi = document.getElementById('clearLogUi');
+  let lastLogSeq = 0;
+
+  clearLogUi.addEventListener('click', () => {
+    logWrap.innerHTML = '';
+    lastLogSeq = 0;
+  });
+
+  async function tick(){
+    try {
+      const r = await fetch('/api/log?since=' + lastLogSeq, { cache: 'no-store' });
+      const j = await r.json();
+      if (Array.isArray(j.lines)) {
+        j.lines.forEach((line) => {
+          const div = document.createElement('div');
+          div.className = 'log-line';
+          div.textContent = line.text;
+          logWrap.appendChild(div);
+        });
+        if (j.lines.length > 0) {
+          logWrap.scrollTop = logWrap.scrollHeight;
+        }
+      }
+      if (typeof j.seq === 'number') lastLogSeq = j.seq;
+    } catch(e) {
+      // ignore
+    }
+  }
+
+  setInterval(tick, 250);
   tick();
 </script>
 </body>
@@ -190,12 +459,23 @@ static const char CAL_HTML[] PROGMEM = R"HTML(
   <title>Kalibrasyon</title>
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-    .card { max-width: 640px; padding: 16px 18px; border: 1px solid rgba(127,127,127,.35); border-radius: 12px; }
+    body {
+      font-family: "Trebuchet MS", "Lucida Sans", "Gill Sans", sans-serif;
+      margin: 20px;
+      background: radial-gradient(1200px 480px at 10% -10%, rgba(120,180,255,.18), transparent 60%),
+                  radial-gradient(900px 420px at 110% 10%, rgba(80,180,120,.18), transparent 55%),
+                  linear-gradient(180deg, rgba(255,255,255,.02), rgba(0,0,0,.05));
+    }
+    .card { max-width: 640px; margin: 0 auto; padding: 16px 18px; border: 1px solid rgba(127,127,127,.35); border-radius: 16px; background: rgba(255,255,255,.02); box-shadow: 0 12px 30px rgba(0,0,0,.08); }
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .muted { opacity: .7; }
-    input[type=number] { padding: 6px 8px; font-size: 16px; width: 160px; }
-    button { padding: 8px 14px; font-size: 16px; }
+    .input { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.03); color: inherit; font-size: 16px; width: 180px; }
+    .btn { padding: 8px 14px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.04); color: inherit; font-size: 16px; }
+    @media (max-width: 640px) {
+      body { margin: 12px; }
+      .card { padding: 14px; border-radius: 14px; }
+      .input { width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -204,13 +484,13 @@ static const char CAL_HTML[] PROGMEM = R"HTML(
     <p class="muted">Offset mm degerini girin. Ornek: -0.01</p>
     <form method="POST" action="/calibrate">
       <div class="row">
-        <input type="number" name="offset" step="0.001" required />
-        <button type="submit">Kaydet</button>
+        <input class="input" type="number" name="offset" step="0.001" required />
+        <button class="btn" type="submit">Kaydet</button>
       </div>
     </form>
     <form method="POST" action="/calibrate" style="margin-top:12px;">
       <input type="hidden" name="offset" value="0" />
-      <button type="submit">Offset Sifirla</button>
+      <button class="btn" type="submit">Offset Sifirla</button>
     </form>
     <p class="muted"><a href="/">Ana sayfaya don</a></p>
   </div>
@@ -227,12 +507,22 @@ static const char UPDATE_HTML[] PROGMEM = R"HTML(
   <title>Yazılım Güncelle</title>
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-    .card { max-width: 640px; padding: 16px 18px; border: 1px solid rgba(127,127,127,.35); border-radius: 12px; }
+    body {
+      font-family: "Trebuchet MS", "Lucida Sans", "Gill Sans", sans-serif;
+      margin: 20px;
+      background: radial-gradient(1200px 480px at 10% -10%, rgba(120,180,255,.18), transparent 60%),
+                  radial-gradient(900px 420px at 110% 10%, rgba(80,180,120,.18), transparent 55%),
+                  linear-gradient(180deg, rgba(255,255,255,.02), rgba(0,0,0,.05));
+    }
+    .card { max-width: 640px; margin: 0 auto; padding: 16px 18px; border: 1px solid rgba(127,127,127,.35); border-radius: 16px; background: rgba(255,255,255,.02); box-shadow: 0 12px 30px rgba(0,0,0,.08); }
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .muted { opacity: .7; }
-    input[type=file] { width: 100%; }
-    button { padding: 8px 14px; font-size: 16px; }
+    .input { width: 100%; padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.03); color: inherit; }
+    .btn { padding: 8px 14px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.04); color: inherit; font-size: 16px; }
+    @media (max-width: 640px) {
+      body { margin: 12px; }
+      .card { padding: 14px; border-radius: 14px; }
+    }
   </style>
 </head>
 <body>
@@ -241,8 +531,8 @@ static const char UPDATE_HTML[] PROGMEM = R"HTML(
     <p class="muted">PlatformIO ile derlediginiz .bin dosyasini secin.</p>
     <form method="POST" action="/update" enctype="multipart/form-data">
       <div class="row">
-        <input type="file" name="firmware" accept=".bin" required />
-        <button type="submit">Yukle</button>
+        <input class="input" type="file" name="firmware" accept=".bin" required />
+        <button class="btn" type="submit">Yukle</button>
       </div>
     </form>
     <p class="muted">Guncelleme basarili olursa cihaz otomatik yeniden baslar.</p>
@@ -261,6 +551,10 @@ static void handleUpdatePage() {
 
 static void handleCalPage() {
   server.send(200, "text/html; charset=utf-8", CAL_HTML);
+}
+
+static void handleLogPage() {
+  server.send(200, "text/html; charset=utf-8", LOG_HTML);
 }
 
 static void handleUpdateResult(bool ok, const char *message) {
@@ -290,6 +584,10 @@ static String buildMeasureJson(uint32_t ageMs) {
   json += ",\"isNegative\":" + String(lastIsNegative ? "true" : "false");
   json += ",\"buttonPressed\":" + String(lastButtonPressed ? "true" : "false");
   json += ",\"offsetMm\":" + String(calOffsetMm, 3);
+  json += ",\"batV\":" + String(lastBatV, 3);
+  json += ",\"batAdcMv\":" + String((unsigned long)lastBatAdcMv);
+  json += ",\"batPct\":" + String((unsigned int)lastBatPct);
+  json += ",\"batCharging\":" + String(lastBatCharging ? "true" : "false");
   json += ",\"ageMs\":" + String((unsigned long)ageMs);
   json += '}';
   return json;
@@ -299,6 +597,38 @@ static void handleApiMeasure() {
   const uint32_t age = (uint32_t)(millis() - lastUpdateMs);
   server.send(200, "application/json", buildMeasureJson(age));
 }
+
+static void handleApiLog() {
+  const uint32_t since = server.hasArg("since") ? (uint32_t)server.arg("since").toInt() : 0;
+  String json;
+  json.reserve(512);
+  json += '{';
+  json += "\"seq\":" + String((unsigned long)logSeq);
+  json += ",\"lines\":[";
+
+  if (logCount > 0) {
+    const uint32_t firstSeq = (logSeq >= logCount) ? (logSeq - logCount) : 0;
+    bool first = true;
+    for (uint16_t i = 0; i < logCount; i++) {
+      const uint32_t id = firstSeq + i + 1;
+      if (id <= since) continue;
+      const uint16_t index = (uint16_t)((id - 1) % LOG_CAP);
+      if (!first) json += ',';
+      json += '{';
+      json += "\"id\":" + String((unsigned long)id) + ",\"text\":";
+      json += '"';
+      appendJsonEscaped(json, logLines[index]);
+      json += '"';
+      json += '}';
+      first = false;
+    }
+  }
+
+  json += ']';
+  json += '}';
+  server.send(200, "application/json", json);
+}
+
 
 static void handleWsEvent(uint8_t clientNum, WStype_t type, uint8_t *payload, size_t length) {
   (void)clientNum;
@@ -348,26 +678,33 @@ static void startMdns() {
 
 void webBegin() {
   loadCalibration();
+  webLogf("Boot: web ui start");
   const bool ok = connectWiFi(15000);
 
   if (ok) {
     Serial.printf("WiFi baglandi: %s  IP: %s\n", WIFI_SSID, WiFi.localIP().toString().c_str());
+    webLogf("WiFi: connected %s", WiFi.localIP().toString().c_str());
     startMdns();
   } else {
     Serial.printf("WiFi baglanamadi: %s (timeout)\n", WIFI_SSID);
+    webLogf("WiFi: connect timeout");
   }
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/measure", HTTP_GET, handleApiMeasure);
+  server.on("/api/log", HTTP_GET, handleApiLog);
+  server.on("/log", HTTP_GET, handleLogPage);
   server.on(UPDATE_PATH, HTTP_GET, handleUpdatePage);
   server.on(CAL_PATH, HTTP_GET, handleCalPage);
   server.on(CAL_PATH, HTTP_POST, []() {
     if (!server.hasArg("offset")) {
       server.send(400, "text/plain", "offset missing");
+      webLogf("Cal: offset missing");
       return;
     }
     const float offset = server.arg("offset").toFloat();
     saveCalibration(offset);
+    webLogf("Cal: offset=%.3f", offset);
     server.sendHeader("Location", "/calibrate");
     server.send(303);
   });
@@ -375,14 +712,17 @@ void webBegin() {
             []() {
               if (!updateInProgress) {
                 handleUpdateResult(false, "Yukleme baslamadi.");
+                webLogf("OTA: upload not started");
                 return;
               }
               const bool ok = Update.end(true);
               updateInProgress = false;
               if (!ok) {
+                webLogf("OTA: end failed %s", Update.errorString());
                 handleUpdateResult(false, Update.errorString());
                 return;
               }
+              webLogf("OTA: update ok, rebooting");
               handleUpdateResult(true, "Guncelleme tamamlandi. Cihaz yeniden baslatiliyor...");
               delay(400);
               ESP.restart();
@@ -392,10 +732,12 @@ void webBegin() {
               if (upload.status == UPLOAD_FILE_START) {
                 updateInProgress = false;
                 if (upload.totalSize > UPDATE_MAX_SIZE) {
+                  webLogf("OTA: size too large (%lu)", (unsigned long)upload.totalSize);
                   Update.abort();
                   return;
                 }
                 if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                  webLogf("OTA: begin failed %s", Update.errorString());
                   Update.abort();
                   return;
                 }
@@ -403,6 +745,7 @@ void webBegin() {
               } else if (upload.status == UPLOAD_FILE_WRITE) {
                 if (updateInProgress) {
                   if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+                    webLogf("OTA: write failed %s", Update.errorString());
                     Update.abort();
                     updateInProgress = false;
                   }
@@ -410,6 +753,7 @@ void webBegin() {
               } else if (upload.status == UPLOAD_FILE_END) {
                 // Finalize in POST handler.
               } else if (upload.status == UPLOAD_FILE_ABORTED) {
+                webLogf("OTA: upload aborted");
                 Update.abort();
                 updateInProgress = false;
               }
@@ -450,3 +794,17 @@ void webUpdateButton(bool isPressed) {
     wsServer.broadcastTXT(payload);
   }
 }
+
+void webUpdateBattery(float volts, uint16_t adcMv, uint8_t percent, bool isCharging) {
+  lastBatV = volts;
+  lastBatAdcMv = adcMv;
+  lastBatPct = percent;
+  lastBatCharging = isCharging;
+  lastUpdateMs = millis();
+
+  if (wsClientCount > 0) {
+    String payload = buildMeasureJson(0);
+    wsServer.broadcastTXT(payload);
+  }
+}
+

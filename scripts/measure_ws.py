@@ -11,9 +11,25 @@ except Exception as exc:
     ) from exc
 
 WS_URL = "ws://kumpas.local:81/"
+ENTER_DELAY_SEC = 0.1
+MIN_PRESS_INTERVAL_SEC = 0.2
+DECIMALS = 2
+DECIMAL_COMMA = True
+
+try:
+    import pyautogui
+except Exception as exc:
+    raise SystemExit(
+        "pyautogui gerekli. Kurulum: pip install pyautogui\n"
+        "Not: aktif pencereye yazar; hedef uygulama odakta olmali"
+    ) from exc
+
+last_btn_pressed = None
+last_press_ts = 0.0
 
 
 def on_message(ws, message):
+    global last_btn_pressed, last_press_ts
     try:
         data = json.loads(message)
     except json.JSONDecodeError:
@@ -26,11 +42,36 @@ def on_message(ws, message):
     is_neg = data.get("isNegative")
     age_ms = data.get("ageMs")
     raw_key = data.get("rawKey")
+    btn_pressed = data.get("buttonPressed")
 
     print(
         f"mm={mm:.2f} inch={inch:.4f} unit={'inch' if is_inch else 'mm'} "
         f"sign={'-' if is_neg else '+'} age={age_ms} raw=0x{raw_key:06X}"
     )
+
+    if btn_pressed is None or mm is None:
+        return
+
+    now = time.monotonic()
+    if last_btn_pressed is None:
+        last_btn_pressed = btn_pressed
+        return
+
+    if (not last_btn_pressed) and btn_pressed:
+        if (now - last_press_ts) < MIN_PRESS_INTERVAL_SEC:
+            last_btn_pressed = btn_pressed
+            return
+
+        value = f"{mm:.{DECIMALS}f}"
+        if DECIMAL_COMMA:
+            value = value.replace(".", ",")
+
+        pyautogui.typewrite(value, interval=0.0)
+        time.sleep(ENTER_DELAY_SEC)
+        pyautogui.press("enter")
+        last_press_ts = now
+
+    last_btn_pressed = btn_pressed
 
 
 def on_error(ws, error):
