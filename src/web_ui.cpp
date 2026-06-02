@@ -94,7 +94,25 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kumpas Ölçüm</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light dark;
+      --accent: #3cc7b0;
+      --accent-strong: #24a88f;
+      --accent-soft: rgba(60,199,176,.28);
+      --accent-2: #5fe3a6;
+    }
+    :root {
+      color-scheme: light dark;
+      --accent: #3cc7b0;
+      --accent-strong: #24a88f;
+      --accent-soft: rgba(60,199,176,.28);
+    }
+    :root {
+      color-scheme: light dark;
+      --accent: #3cc7b0;
+      --accent-strong: #24a88f;
+      --accent-soft: rgba(60,199,176,.28);
+    }
     body {
       font-family: "Trebuchet MS", "Lucida Sans", "Gill Sans", sans-serif;
       margin: 20px;
@@ -111,14 +129,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     .muted { opacity: .6; }
     .battery { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
     .battery-bar { position: relative; height: 18px; border-radius: 999px; background: rgba(127,127,127,.2); overflow: hidden; }
-    .battery-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #56c070, #9de26a); transition: width .25s ease; }
+    .battery-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent-strong), var(--accent-2)); transition: width .25s ease; }
     .battery-fill.low { background: linear-gradient(90deg, #e05a5a, #f0b35a); }
     .battery-label { display: flex; align-items: baseline; gap: 10px; font-size: 22px; }
     .battery-volts { font-size: 16px; opacity: .75; }
     .charge-pill { display:inline-flex; align-items:center; gap:8px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(127,127,127,.35); font-size: 12px; letter-spacing: .3px; text-transform: uppercase; }
     .charge-dot { width: 8px; height: 8px; border-radius: 50%; background: #a6a6a6; }
-    .charge-pill.on { border-color: rgba(86,192,112,.5); color: #56c070; }
-    .charge-pill.on .charge-dot { background: #56c070; box-shadow: 0 0 0 6px rgba(86,192,112,.15); animation: pulse 1.6s ease-in-out infinite; }
+    .charge-pill.on { border-color: var(--accent-soft); color: var(--accent); }
+    .charge-pill.on .charge-dot { background: var(--accent); box-shadow: 0 0 0 6px var(--accent-soft); animation: pulse 1.6s ease-in-out infinite; }
     @keyframes pulse { 0% { transform: scale(.85); opacity: .5; } 50% { transform: scale(1.1); opacity: 1; } 100% { transform: scale(.85); opacity: .5; } }
     .actions { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
     .action-link {
@@ -133,11 +151,19 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       transition: transform .12s ease, box-shadow .12s ease;
     }
     .action-link:hover { transform: translateY(-1px); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08), 0 10px 22px rgba(0,0,0,.16); }
-    .action-link:focus-visible { outline: 2px solid rgba(120,180,255,.6); outline-offset: 2px; }
-    .action-link.log { border-color: rgba(120,180,255,.45); color: #7fb6ff; }
+    .action-link:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 2px; }
+    .action-link.log { border-color: var(--accent-soft); color: var(--accent); }
     .log-wrap { margin-top: 10px; border: 1px solid rgba(127,127,127,.25); border-radius: 10px; padding: 10px; background: rgba(0,0,0,.08); max-height: 260px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; }
     .btn { padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.04); color: inherit; }
     .input { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.03); color: inherit; }
+    .btn-ghost { padding: 6px 8px; border-radius: 8px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.02); }
+    .note-wrap { position: relative; display: flex; align-items: center; gap: 8px; }
+    .note-text { flex: 1; min-width: 0; }
+    .note-edit { position: absolute; right: 0; top: 110%; z-index: 3; display: none; min-width: 220px; padding: 10px; border-radius: 12px; border: 1px solid rgba(127,127,127,.35); background: rgba(30,30,30,.9); box-shadow: 0 12px 24px rgba(0,0,0,.25); }
+    .note-edit.open { display: block; }
+    .note-actions { display: none; }
+    .note-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.35); backdrop-filter: blur(1px); display: none; z-index: 2; }
+    .note-backdrop.open { display: block; }
     @media (max-width: 640px) {
       body { margin: 12px; }
       .card { padding: 14px; border-radius: 14px; }
@@ -148,6 +174,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       .actions { gap: 8px; }
       .action-link { padding: 6px 10px; font-size: 12px; }
       .battery-label { font-size: 20px; }
+      .note-edit {
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: calc(100% - 48px);
+        max-width: 360px;
+      }
     }
   </style>
 </head>
@@ -195,6 +229,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     </div>
   </div>
 
+  <div id="noteBackdrop" class="note-backdrop"></div>
+
   <div class="card" style="margin-top:16px;">
     <div class="row" style="justify-content: space-between;">
       <div>
@@ -230,6 +266,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   const clearLog = document.getElementById('clearLog');
   const exportCsv = document.getElementById('exportCsv');
   const noteInput = document.getElementById('noteInput');
+  const noteBackdrop = document.getElementById('noteBackdrop');
   let lastBtnPressed = null;
 
   function fmtTime(ts){
@@ -242,16 +279,28 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   function appendLogRow(j){
     const tr = document.createElement('tr');
     const ts = fmtTime(Date.now());
-    const unitNote = j.isInch ? 'inch kaynagi' : 'mm kaynagi';
     const userNote = noteInput.value.trim();
-    const noteText = userNote ? `${userNote} (${unitNote})` : unitNote;
+    const noteText = userNote;
     tr.innerHTML = `
       <td style="padding:6px 4px; border-bottom:1px solid rgba(127,127,127,.2);">${ts}</td>
       <td style="padding:6px 4px; text-align:right; border-bottom:1px solid rgba(127,127,127,.2);">${j.mm.toFixed(2)}</td>
       <td style="padding:6px 4px; text-align:right; border-bottom:1px solid rgba(127,127,127,.2);">${j.inch.toFixed(4)}</td>
-      <td style="padding:6px 4px; border-bottom:1px solid rgba(127,127,127,.2);">${noteText}</td>
+      <td style="padding:4px; border-bottom:1px solid rgba(127,127,127,.2);">
+        <div class="note-wrap">
+          <span class="note-text"></span>
+          <button class="btn-ghost note-btn" type="button" title="Notu duzenle">✎</button>
+          <div class="note-edit">
+            <input class="input note-input" type="text" maxlength="80" placeholder="Not" />
+          </div>
+        </div>
+      </td>
     `;
     logBody.prepend(tr);
+
+    const noteSpan = tr.querySelector('.note-text');
+    const noteInputEl = tr.querySelector('.note-input');
+    if (noteSpan) noteSpan.textContent = noteText;
+    if (noteInputEl) noteInputEl.value = noteText;
 
     if (userNote) noteInput.value = '';
 
@@ -265,6 +314,53 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     logBody.innerHTML = '';
   });
 
+  function closeAllEditors(){
+    logBody.querySelectorAll('.note-edit.open').forEach((el) => {
+      el.classList.remove('open');
+    });
+    if (noteBackdrop) noteBackdrop.classList.remove('open');
+  }
+
+  logBody.addEventListener('click', (e) => {
+    const btn = e.target.closest('.note-btn');
+    if (btn) {
+      closeAllEditors();
+      const wrap = btn.closest('.note-wrap');
+      const editor = wrap ? wrap.querySelector('.note-edit') : null;
+      const input = wrap ? wrap.querySelector('.note-input') : null;
+      const text = wrap ? wrap.querySelector('.note-text') : null;
+      if (editor) {
+        if (input && text) input.value = text.textContent || '';
+        editor.classList.add('open');
+        if (input) input.focus();
+        if (noteBackdrop) noteBackdrop.classList.add('open');
+      }
+      return;
+    }
+
+  });
+
+  logBody.addEventListener('focusout', (e) => {
+    const input = e.target.closest('.note-input');
+    if (!input) return;
+    const wrap = input.closest('.note-wrap');
+    const text = wrap ? wrap.querySelector('.note-text') : null;
+    const editor = wrap ? wrap.querySelector('.note-edit') : null;
+    if (text) text.textContent = input.value.trim();
+    if (editor) editor.classList.remove('open');
+    if (noteBackdrop) noteBackdrop.classList.remove('open');
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.note-wrap')) closeAllEditors();
+  });
+
+  if (noteBackdrop) {
+    noteBackdrop.addEventListener('click', () => {
+      closeAllEditors();
+    });
+  }
+
   exportCsv.addEventListener('click', () => {
     const now = new Date();
     const pad2 = (n) => String(n).padStart(2, '0');
@@ -273,14 +369,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       ['Zaman', 'mm', 'in', 'Not']
     ];
     Array.from(logBody.children).reverse().forEach((tr) => {
-      const cells = Array.from(tr.children).map((td) => td.textContent || '');
+      const cells = Array.from(tr.children).map((td, idx) => {
+        if (idx === 3) {
+          const span = td.querySelector('.note-text');
+          return span ? span.textContent : '';
+        }
+        return td.textContent || '';
+      });
       rows.push(cells);
     });
     const csv = rows.map((row) => row.map((v) => {
       const s = String(v).replace(/"/g, '""');
       return `"${s}"`;
     }).join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const bom = '\ufeff';
+    const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -360,7 +463,13 @@ static const char LOG_HTML[] PROGMEM = R"HTML(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Log</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light dark;
+      --accent: #3cc7b0;
+      --accent-strong: #24a88f;
+      --accent-soft: rgba(60,199,176,.28);
+      --accent-2: #5fe3a6;
+    }
     body {
       font-family: "Trebuchet MS", "Lucida Sans", "Gill Sans", sans-serif;
       margin: 20px;
@@ -384,10 +493,11 @@ static const char LOG_HTML[] PROGMEM = R"HTML(
       align-items: center;
       gap: 8px;
     }
+    .action-link:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 2px; }
     .log-wrap { margin-top: 10px; border: 1px solid rgba(127,127,127,.25); border-radius: 10px; padding: 10px; background: rgba(0,0,0,.08); max-height: 420px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; }
     .log-line { white-space: pre-wrap; line-height: 1.35; border-bottom: 1px dashed rgba(127,127,127,.15); padding: 2px 0; }
     .log-line:last-child { border-bottom: none; }
-    .btn { padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.04); color: inherit; }
+    .btn { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--accent-soft); background: rgba(255,255,255,.04); color: inherit; }
     @media (max-width: 640px) {
       body { margin: 12px; }
       .card { padding: 14px; border-radius: 14px; }
@@ -470,7 +580,7 @@ static const char CAL_HTML[] PROGMEM = R"HTML(
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .muted { opacity: .7; }
     .input { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.03); color: inherit; font-size: 16px; width: 180px; }
-    .btn { padding: 8px 14px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.04); color: inherit; font-size: 16px; }
+    .btn { padding: 8px 14px; border-radius: 10px; border: 1px solid var(--accent-soft); background: linear-gradient(160deg, rgba(60,199,176,.18), rgba(0,0,0,.05)); color: inherit; font-size: 16px; }
     @media (max-width: 640px) {
       body { margin: 12px; }
       .card { padding: 14px; border-radius: 14px; }
@@ -518,7 +628,7 @@ static const char UPDATE_HTML[] PROGMEM = R"HTML(
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .muted { opacity: .7; }
     .input { width: 100%; padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.03); color: inherit; }
-    .btn { padding: 8px 14px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: rgba(255,255,255,.04); color: inherit; font-size: 16px; }
+    .btn { padding: 8px 14px; border-radius: 10px; border: 1px solid var(--accent-soft); background: linear-gradient(160deg, rgba(60,199,176,.18), rgba(0,0,0,.05)); color: inherit; font-size: 16px; }
     @media (max-width: 640px) {
       body { margin: 12px; }
       .card { padding: 14px; border-radius: 14px; }
