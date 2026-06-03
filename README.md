@@ -399,6 +399,50 @@ Flash tamamen sılinir, temiz kurulum yapılır.
 
 ### Ölçüm gelmiyor (tarayıcıda `--` görünüyor)
 
+### PlatformIO penv / `.venv` sorunları (Windows)
+
+Bazı makinelerde proje klasöründeki Python `.venv` ile PlatformIO'nun kendi sanal ortamı (`penv`) çakışabilir. Aşağıdaki adımlarla PlatformIO'nin sağladığı ortamı kullanıp derlemeyi garanti altına alın.
+
+- Hangi `pio` yürütülüyor kontrol edin:
+
+```powershell
+Get-Command pio.exe
+where.exe pio.exe
+```
+
+- PlatformIO'nin kendi penv içindeki `pio.exe` ile derlemek (örnek):
+
+```powershell
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -d "$(pwd)"
+```
+
+- VS Code terminalinin ve Python interpreter'ının PlatformIO penv'i kullanması için workspace ayarına şu satırları ekleyebilirsiniz (ya da `.vscode/settings.json` dosyası oluşturun):
+
+```json
+{
+   "python.defaultInterpreterPath": "%USERPROFILE%\\.platformio\\penv\\Scripts\\python.exe",
+   "terminal.integrated.env.windows": {
+      "PATH": "%USERPROFILE%\\.platformio\\penv\\Scripts;${env:PATH}"
+   }
+}
+```
+
+- Eğer proje kökünde `.venv` varsa ve kaldırmak isterseniz (PlatformIO penv tercih edilecekse):
+
+PowerShell:
+```powershell
+Remove-Item -Recurse -Force .venv
+```
+
+CMD:
+```cmd
+rmdir /s /q .venv
+```
+
+- Tam `.venv` içinde çalışmak isterseniz native uzantılar (`fatfs`, vb.) için C derleyicisi gerekir. Windows'ta "Microsoft C++ Build Tools" (Visual Studio Build Tools) yüklü olmalıdır. Aksi hâlde `pip install fatfs` sırasında hata alırsınız.
+
+Bu adımlarla, sizin ve diğer katkıda bulunanların `ModuleNotFoundError: No module named 'fatfs.wrapper'` veya `ImportError: cannot import name 'lfs'` gibi hatalarla karşılaşma olasılığı büyük ölçüde azalır.
+
 1. Kumpas açık mı?
 2. Seviye dönüştürücü bağlı mı? GND ortak mı?
 3. Seri monitörde ne yazıyor? `webUpdateMeasurement` çağrılıyor mu?
