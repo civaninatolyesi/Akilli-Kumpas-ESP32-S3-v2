@@ -4,6 +4,8 @@
 > Hiç ESP32 görmemiş, Arduino yazmamış, elektronikten anlamayan biri de bu projeyi tamamlayabilmeli.  
 > Her adımın *ne* yapıldığı ve *neden* yapıldığı açıklanır.
 
+> **Teknik dokümantasyon:** Gereksinimler (SRS), yazılım tasarımı (SDD), mimari karar kayıtları (ADR), adım adım rehberler (GUIDE) ve bilinen sorunlar listesi [doc/](doc/README.md) klasöründedir. Bu README ile `doc/` arasında çelişki varsa `doc/` esas alınır.
+
 ---
 
 ## İçindekiler
@@ -506,6 +508,8 @@ kumpas-veri-okuma-s3-super-mini/
 │
 ├── scripts/
 │   └── measure_ws.py     ← Python: butona basınca Excel'e ölçüm yaz
+│
+├── doc/                   ← SRS, SDD, ADR-NNN_*, GUIDE-NNN_*, bilinen sorunlar
 │
 ├── platformio.ini         ← PlatformIO derleme ayarları
 ├── partitions_ota_4mb.csv ← 4MB flash partition tablosu (OTA için)
